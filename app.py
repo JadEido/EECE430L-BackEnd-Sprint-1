@@ -204,6 +204,76 @@ def exchange_rate():
     })
 
 
+# ── analytics & history ───────────────────────────────────────────────────────
+
+@app.route('/exchangeRate/history', methods=['GET'])
+@limiter.limit("10 per minute")
+def exchange_rate_history():
+    """Return time-series exchange rate grouped by hour or day."""
+    hours = int(request.args.get("hours", 72))
+    interval = request.args.get("interval", "hourly")  # hourly | daily
+
+    now = datetime.datetime.now()
+    start = now - datetime.timedelta(hours=hours)
+
+    txs = Transaction.query.filter(
+        Transaction.added_date.between(start, now),
+        Transaction.flagged == False
+    ).order_by(Transaction.added_date).all()
+
+    buckets = {}
+    for t in txs:
+        if interval == "daily":
+            key = t.added_date.strftime("%Y-%m-%d")
+        else:
+            key = t.added_date.strftime("%Y-%m-%dT%H:00")
+
+        if key not in buckets:
+            buckets[key] = {"usd_to_lbp": [], "lbp_to_usd": []}
+        rate = t.lbp_amount / t.usd_amount if t.usd_amount else None
+        if rate:
+            if t.usd_to_lbp:
+                buckets[key]["usd_to_lbp"].append(rate)
+            else:
+                buckets[key]["lbp_to_usd"].append(rate)
+
+    result = []
+    for ts in sorted(buckets.keys()):
+        u = buckets[ts]["usd_to_lbp"]
+        l = buckets[ts]["lbp_to_usd"]
+        result.append({
+            "timestamp": ts,
+            "usd_to_lbp": sum(u) / len(u) if u else None,
+            "lbp_to_usd": sum(l) / len(l) if l else None
+        })
+
+    return jsonify(result)
+
+
+@app.route('/transaction/stats', methods=['GET'])
+@limiter.limit("10 per minute")
+def transaction_stats():
+    """Return basic statistics for the authenticated user's transactions."""
+    user = require_auth(request)
+
+    txs = Transaction.query.filter_by(user_id=user.id).all()
+    if not txs:
+        return jsonify({"count": 0})
+
+    rates = [(t.lbp_amount / t.usd_amount) for t in txs if t.usd_amount]
+    count = len(rates)
+    avg = sum(rates) / count
+    mn = min(rates)
+    mx = max(rates)
+
+    return jsonify({
+        "count": count,
+        "avg_rate": avg,
+        "min_rate": mn,
+        "max_rate": mx
+    })
+
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
