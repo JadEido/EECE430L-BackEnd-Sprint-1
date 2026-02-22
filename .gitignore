@@ -1,0 +1,11 @@
+#As to not leak my secrets
+.env
+#added this because it is useless
+venv/
+__pycache__/
+**/.idea/shelf/
+**/.idea/tasks.xml
+**/.idea/workspace.xml
+**/.idea/usage.statistics.xml
+db_config.py
+tmpclaude*
