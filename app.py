@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, abort, make_response
 import os
 import csv
 import io
+import json
 import statistics
 from dotenv import load_dotenv
 from flask_limiter import Limiter
@@ -674,6 +675,66 @@ def admin_flag_transaction(tx_id):
     db.session.commit()
     log_event("transaction_flag", f"Transaction {tx_id} flagged={flagged}", user_id=admin.id)
     return jsonify(transaction_schema.dump(tx))
+
+
+# ── reporting & backup ────────────────────────────────────────────────────────
+
+@app.route('/report/summary', methods=['GET'])
+@limiter.limit("10 per minute")
+def report_summary():
+    require_auth(request)
+
+    now = datetime.datetime.now()
+    start_72h = now - datetime.timedelta(hours=72)
+
+    total_tx = Transaction.query.count()
+    recent_tx = Transaction.query.filter(Transaction.added_date >= start_72h).count()
+    flagged_tx = Transaction.query.filter_by(flagged=True).count()
+    total_users = User.query.count()
+    active_users = User.query.filter_by(status='active').count()
+    open_offers = Offer.query.filter_by(status='open').count()
+
+    usd_to_lbp_rate = get_current_rate(True)
+    lbp_to_usd_rate = get_current_rate(False)
+
+    return jsonify({
+        "total_transactions": total_tx,
+        "transactions_last_72h": recent_tx,
+        "flagged_transactions": flagged_tx,
+        "total_users": total_users,
+        "active_users": active_users,
+        "open_offers": open_offers,
+        "current_usd_to_lbp": usd_to_lbp_rate,
+        "current_lbp_to_usd": lbp_to_usd_rate
+    })
+
+
+@app.route('/admin/backup', methods=['POST'])
+@limiter.limit("5 per minute")
+def create_backup():
+    admin = require_admin(request)
+
+    os.makedirs("backups", exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"backups/backup_{timestamp}.json"
+
+    txs = Transaction.query.all()
+    users = User.query.all()
+
+    from model.transaction import TransactionSchema as TxSchema
+    from model.user import UserSchema as USchema
+
+    data = {
+        "timestamp": timestamp,
+        "transactions": TxSchema(many=True).dump(txs),
+        "users": USchema(many=True).dump(users)
+    }
+
+    with open(filename, "w") as f:
+        json.dump(data, f, indent=2, default=str)
+
+    log_event("backup", f"Backup created: {filename}", user_id=admin.id)
+    return jsonify({"message": "Backup created", "file": filename})
 
 
 if __name__ == "__main__":
