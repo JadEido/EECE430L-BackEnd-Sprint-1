@@ -7,17 +7,20 @@ class Transaction(db.Model):
     usd_amount = db.Column(db.Float, nullable=False)
     lbp_amount = db.Column(db.Float, nullable=False)
     usd_to_lbp = db.Column(db.Boolean, nullable=False)
-
     added_date = db.Column(db.DateTime)
     user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=True)
+    source = db.Column(db.String(20), default='manual')
+    flagged = db.Column(db.Boolean, default=False)
 
-    def __init__(self, usd_amount, lbp_amount, usd_to_lbp, user_id=None):
+    def __init__(self, usd_amount, lbp_amount, usd_to_lbp, user_id=None, source='manual'):
         super(Transaction, self).__init__(
             usd_amount=usd_amount,
             lbp_amount=lbp_amount,
             usd_to_lbp=usd_to_lbp,
             user_id=user_id,
-            added_date=datetime.now()
+            added_date=datetime.now(),
+            source=source,
+            flagged=False
         )
 
 
@@ -25,6 +28,6 @@ class TransactionSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Transaction
         include_fk = True
-        fields = ("id", "usd_amount", "lbp_amount", "usd_to_lbp", "added_date", "user_id")
+        fields = ("id", "usd_amount", "lbp_amount", "usd_to_lbp", "added_date", "user_id", "source", "flagged")
 
 transaction_schema = TransactionSchema()
