@@ -274,6 +274,98 @@ def transaction_stats():
     })
 
 
+# ── P2P marketplace ───────────────────────────────────────────────────────────
+
+@app.route('/offer', methods=['POST'])
+@limiter.limit("10 per minute")
+def create_offer():
+    user = require_auth(request)
+    data = request.get_json() or {}
+
+    usd_amount = float(data.get("usd_amount", 0))
+    lbp_amount = float(data.get("lbp_amount", 0))
+    usd_to_lbp = data.get("usd_to_lbp")
+
+    if usd_amount <= 0 or lbp_amount <= 0 or usd_to_lbp is None:
+        return jsonify({"error": "usd_amount, lbp_amount, and usd_to_lbp are required"}), 400
+
+    # lock funds
+    if usd_to_lbp:
+        if user.usd_balance < usd_amount:
+            return jsonify({"error": "Insufficient USD balance"}), 400
+        user.usd_balance -= usd_amount
+    else:
+        if user.lbp_balance < lbp_amount:
+            return jsonify({"error": "Insufficient LBP balance"}), 400
+        user.lbp_balance -= lbp_amount
+
+    offer = Offer(user_id=user.id, usd_amount=usd_amount, lbp_amount=lbp_amount, usd_to_lbp=usd_to_lbp)
+    db.session.add(offer)
+    db.session.commit()
+    return jsonify(offer_schema.dump(offer)), 201
+
+
+@app.route('/offer', methods=['GET'])
+@limiter.limit("10 per minute")
+def list_offers():
+    open_offers = Offer.query.filter_by(status='open').all()
+    return jsonify(offers_schema.dump(open_offers))
+
+
+@app.route('/offer/<int:offer_id>/accept', methods=['POST'])
+@limiter.limit("10 per minute")
+def accept_offer(offer_id):
+    user = require_auth(request)
+    offer = Offer.query.get_or_404(offer_id)
+
+    if offer.status != 'open':
+        return jsonify({"error": "Offer is no longer available"}), 409
+    if offer.user_id == user.id:
+        return jsonify({"error": "Cannot accept your own offer"}), 400
+
+    if offer.usd_to_lbp:
+        if user.lbp_balance < offer.lbp_amount:
+            return jsonify({"error": "Insufficient LBP balance"}), 400
+        user.lbp_balance -= offer.lbp_amount
+        user.usd_balance += offer.usd_amount
+        creator = User.query.get(offer.user_id)
+        creator.lbp_balance += offer.lbp_amount
+    else:
+        if user.usd_balance < offer.usd_amount:
+            return jsonify({"error": "Insufficient USD balance"}), 400
+        user.usd_balance -= offer.usd_amount
+        user.lbp_balance += offer.lbp_amount
+        creator = User.query.get(offer.user_id)
+        creator.usd_balance += offer.usd_amount
+
+    offer.status = 'accepted'
+    offer.accepted_by = user.id
+    offer.accepted_at = datetime.datetime.now()
+    db.session.commit()
+    return jsonify(offer_schema.dump(offer))
+
+
+@app.route('/offer/<int:offer_id>', methods=['DELETE'])
+@limiter.limit("10 per minute")
+def cancel_offer(offer_id):
+    user = require_auth(request)
+    offer = Offer.query.get_or_404(offer_id)
+
+    if offer.user_id != user.id:
+        abort(403)
+    if offer.status != 'open':
+        return jsonify({"error": "Offer is not open"}), 409
+
+    if offer.usd_to_lbp:
+        user.usd_balance += offer.usd_amount
+    else:
+        user.lbp_balance += offer.lbp_amount
+
+    offer.status = 'cancelled'
+    db.session.commit()
+    return jsonify(offer_schema.dump(offer))
+
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
