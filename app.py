@@ -1,5 +1,7 @@
-from flask import Flask, request, jsonify, abort
+from flask import Flask, request, jsonify, abort, make_response
 import os
+import csv
+import io
 from dotenv import load_dotenv
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -476,6 +478,60 @@ def delete_watchlist(item_id):
     db.session.delete(item)
     db.session.commit()
     return jsonify({"message": "Watchlist item removed"})
+
+
+# ── CSV export & preferences ──────────────────────────────────────────────────
+
+@app.route('/transaction/export', methods=['GET'])
+@limiter.limit("10 per minute")
+def export_transactions():
+    user = require_auth(request)
+    txs = Transaction.query.filter_by(user_id=user.id).order_by(Transaction.added_date).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["id", "usd_amount", "lbp_amount", "usd_to_lbp", "added_date", "source", "flagged"])
+    for t in txs:
+        writer.writerow([t.id, t.usd_amount, t.lbp_amount, t.usd_to_lbp, t.added_date, t.source, t.flagged])
+
+    resp = make_response(output.getvalue())
+    resp.headers["Content-Disposition"] = "attachment; filename=transactions.csv"
+    resp.headers["Content-Type"] = "text/csv"
+    return resp
+
+
+@app.route('/preferences', methods=['GET'])
+@limiter.limit("10 per minute")
+def get_preferences():
+    user = require_auth(request)
+    prefs = UserPreferences.query.filter_by(user_id=user.id).first()
+    if not prefs:
+        prefs = UserPreferences(user_id=user.id)
+        db.session.add(prefs)
+        db.session.commit()
+    return jsonify(preferences_schema.dump(prefs))
+
+
+@app.route('/preferences', methods=['PUT'])
+@limiter.limit("10 per minute")
+def update_preferences():
+    user = require_auth(request)
+    data = request.get_json() or {}
+
+    prefs = UserPreferences.query.filter_by(user_id=user.id).first()
+    if not prefs:
+        prefs = UserPreferences(user_id=user.id)
+        db.session.add(prefs)
+
+    if "default_time_range" in data:
+        prefs.default_time_range = int(data["default_time_range"])
+    if "default_interval" in data:
+        if data["default_interval"] not in ("hourly", "daily"):
+            return jsonify({"error": "default_interval must be 'hourly' or 'daily'"}), 400
+        prefs.default_interval = data["default_interval"]
+
+    db.session.commit()
+    return jsonify(preferences_schema.dump(prefs))
 
 
 if __name__ == "__main__":
