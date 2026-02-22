@@ -3,6 +3,7 @@ import os
 import csv
 import io
 import json
+import random
 import statistics
 from dotenv import load_dotenv
 from flask_limiter import Limiter
@@ -117,6 +118,18 @@ def authenticate():
 
     if not bcrypt.check_password_hash(user.hashed_password, password):
         abort(403)
+
+    # MFA flow: generate code and require second step
+    if user.mfa_enabled:
+        code = str(random.randint(100000, 999999))
+        user.mfa_code = code
+        user.mfa_code_expiry = datetime.datetime.now() + datetime.timedelta(minutes=10)
+        db.session.commit()
+        # deliver code via notification (in production, this would be email/SMS)
+        notif = Notification(user_id=user.id, message=f"Your MFA code is: {code}")
+        db.session.add(notif)
+        db.session.commit()
+        return jsonify({"mfa_required": True, "user_id": user.id})
 
     token = create_token(user.id)
     return jsonify({"token": token})
@@ -735,6 +748,59 @@ def create_backup():
 
     log_event("backup", f"Backup created: {filename}", user_id=admin.id)
     return jsonify({"message": "Backup created", "file": filename})
+
+
+# ── MFA (multi-factor authentication) ────────────────────────────────────────
+
+@app.route('/authentication/mfa', methods=['POST'])
+@limiter.limit("5 per minute")
+def verify_mfa():
+    data = request.get_json() or {}
+    user_id = data.get("user_id")
+    code = data.get("code")
+
+    if not user_id or not code:
+        return jsonify({"error": "user_id and code are required"}), 400
+
+    user = User.query.get(user_id)
+    if not user or not user.mfa_enabled:
+        abort(403)
+
+    if not user.mfa_code or not user.mfa_code_expiry:
+        return jsonify({"error": "No MFA code pending"}), 400
+
+    if datetime.datetime.now() > user.mfa_code_expiry:
+        user.mfa_code = None
+        user.mfa_code_expiry = None
+        db.session.commit()
+        return jsonify({"error": "MFA code expired"}), 401
+
+    if user.mfa_code != str(code):
+        return jsonify({"error": "Invalid MFA code"}), 401
+
+    user.mfa_code = None
+    user.mfa_code_expiry = None
+    db.session.commit()
+    token = create_token(user.id)
+    return jsonify({"token": token})
+
+
+@app.route('/user/mfa', methods=['PUT'])
+@limiter.limit("10 per minute")
+def toggle_mfa():
+    user = require_auth(request)
+    data = request.get_json() or {}
+    enabled = data.get("enabled")
+
+    if enabled is None:
+        return jsonify({"error": "enabled field is required"}), 400
+
+    user.mfa_enabled = bool(enabled)
+    if not user.mfa_enabled:
+        user.mfa_code = None
+        user.mfa_code_expiry = None
+    db.session.commit()
+    return jsonify({"mfa_enabled": user.mfa_enabled})
 
 
 if __name__ == "__main__":
