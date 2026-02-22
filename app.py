@@ -366,6 +366,118 @@ def cancel_offer(offer_id):
     return jsonify(offer_schema.dump(offer))
 
 
+# ── alerts & watchlist ────────────────────────────────────────────────────────
+
+def get_current_rate(usd_to_lbp):
+    """Return the 72-hour average exchange rate (excluding flagged)."""
+    now = datetime.datetime.now()
+    start = now - datetime.timedelta(hours=72)
+    txs = Transaction.query.filter(
+        Transaction.added_date.between(start, now),
+        Transaction.usd_to_lbp == usd_to_lbp,
+        Transaction.flagged == False
+    ).all()
+    if not txs:
+        return None
+    total_usd = sum(t.usd_amount for t in txs)
+    total_lbp = sum(t.lbp_amount for t in txs)
+    if usd_to_lbp:
+        return total_lbp / total_usd if total_usd else None
+    else:
+        return total_usd / total_lbp if total_lbp else None
+
+
+def check_alerts_for_rate(rate, usd_to_lbp):
+    """Trigger any active alerts whose threshold has been crossed."""
+    active_alerts = Alert.query.filter_by(usd_to_lbp=usd_to_lbp, active=True).all()
+    for alert in active_alerts:
+        if rate >= alert.target_rate:
+            alert.active = False
+            notif = Notification(
+                user_id=alert.user_id,
+                message=f"Alert triggered: rate {rate:.2f} reached your target {alert.target_rate:.2f}"
+            )
+            db.session.add(notif)
+    db.session.commit()
+
+
+@app.route('/alert', methods=['POST'])
+@limiter.limit("10 per minute")
+def create_alert():
+    user = require_auth(request)
+    data = request.get_json() or {}
+
+    target_rate = data.get("target_rate")
+    usd_to_lbp = data.get("usd_to_lbp")
+
+    if target_rate is None or usd_to_lbp is None:
+        return jsonify({"error": "target_rate and usd_to_lbp are required"}), 400
+
+    alert = Alert(user_id=user.id, target_rate=float(target_rate), usd_to_lbp=usd_to_lbp)
+    db.session.add(alert)
+    db.session.commit()
+    return jsonify(alert_schema.dump(alert)), 201
+
+
+@app.route('/alert', methods=['GET'])
+@limiter.limit("10 per minute")
+def list_alerts():
+    user = require_auth(request)
+    user_alerts = Alert.query.filter_by(user_id=user.id).all()
+    return jsonify(alerts_schema.dump(user_alerts))
+
+
+@app.route('/alert/<int:alert_id>', methods=['DELETE'])
+@limiter.limit("10 per minute")
+def delete_alert(alert_id):
+    user = require_auth(request)
+    alert = Alert.query.get_or_404(alert_id)
+    if alert.user_id != user.id:
+        abort(403)
+    db.session.delete(alert)
+    db.session.commit()
+    return jsonify({"message": "Alert deleted"})
+
+
+@app.route('/watchlist', methods=['POST'])
+@limiter.limit("10 per minute")
+def add_watchlist():
+    user = require_auth(request)
+    data = request.get_json() or {}
+
+    label = data.get("label")
+    rate_threshold = data.get("rate_threshold")
+    usd_to_lbp = data.get("usd_to_lbp")
+
+    if not label or rate_threshold is None or usd_to_lbp is None:
+        return jsonify({"error": "label, rate_threshold, and usd_to_lbp are required"}), 400
+
+    item = WatchlistItem(user_id=user.id, label=label, rate_threshold=float(rate_threshold), usd_to_lbp=usd_to_lbp)
+    db.session.add(item)
+    db.session.commit()
+    return jsonify(watchlist_schema.dump(item)), 201
+
+
+@app.route('/watchlist', methods=['GET'])
+@limiter.limit("10 per minute")
+def list_watchlist():
+    user = require_auth(request)
+    items = WatchlistItem.query.filter_by(user_id=user.id).all()
+    return jsonify(watchlists_schema.dump(items))
+
+
+@app.route('/watchlist/<int:item_id>', methods=['DELETE'])
+@limiter.limit("10 per minute")
+def delete_watchlist(item_id):
+    user = require_auth(request)
+    item = WatchlistItem.query.get_or_404(item_id)
+    if item.user_id != user.id:
+        abort(403)
+    db.session.delete(item)
+    db.session.commit()
+    return jsonify({"message": "Watchlist item removed"})
+
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
