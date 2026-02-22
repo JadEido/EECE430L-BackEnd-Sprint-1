@@ -2,6 +2,7 @@ from flask import Flask, request, jsonify, abort, make_response
 import os
 import csv
 import io
+import statistics
 from dotenv import load_dotenv
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
@@ -144,14 +145,28 @@ def add_transaction():
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
             abort(403)
 
+    usd_to_lbp_val = request.json["usd_to_lbp"]
+    rate = lbp_amount / usd_amount if usd_amount else 0
+
     t = Transaction(
         usd_amount=usd_amount,
         lbp_amount=lbp_amount,
-        usd_to_lbp=request.json["usd_to_lbp"],
+        usd_to_lbp=usd_to_lbp_val,
         user_id=user_id
     )
     db.session.add(t)
+    db.session.flush()
+
+    # auto-flag outliers after there are enough data points
+    if is_outlier_rate(rate, usd_to_lbp_val):
+        t.flagged = True
+
     db.session.commit()
+
+    current_rate = get_current_rate(usd_to_lbp_val)
+    if current_rate:
+        check_alerts_for_rate(current_rate, usd_to_lbp_val)
+
     return jsonify(transaction_schema.dump(t))
 
 
@@ -598,6 +613,67 @@ def admin_set_user_role(user_id):
     db.session.commit()
     log_event("role_change", f"User {target.user_name} role changed to {new_role}", user_id=admin.id)
     return jsonify({"id": target.id, "user_name": target.user_name, "role": target.role})
+
+
+# ── notifications & data quality ─────────────────────────────────────────────
+
+def is_outlier_rate(rate, usd_to_lbp):
+    """Return True if rate deviates more than 2 std deviations from the 72hr mean."""
+    now = datetime.datetime.now()
+    start = now - datetime.timedelta(hours=72)
+    txs = Transaction.query.filter(
+        Transaction.added_date.between(start, now),
+        Transaction.usd_to_lbp == usd_to_lbp,
+        Transaction.flagged == False
+    ).all()
+    if len(txs) < 5:
+        return False
+    rates = [t.lbp_amount / t.usd_amount for t in txs if t.usd_amount]
+    if len(rates) < 5:
+        return False
+    mean = statistics.mean(rates)
+    stdev = statistics.stdev(rates)
+    return abs(rate - mean) > 2 * stdev
+
+
+def send_notification(user_id, message):
+    notif = Notification(user_id=user_id, message=message)
+    db.session.add(notif)
+    db.session.commit()
+
+
+@app.route('/notification', methods=['GET'])
+@limiter.limit("10 per minute")
+def list_notifications():
+    user = require_auth(request)
+    notifs = Notification.query.filter_by(user_id=user.id).order_by(Notification.created_at.desc()).all()
+    return jsonify(notifications_schema.dump(notifs))
+
+
+@app.route('/notification/<int:notif_id>/read', methods=['PUT'])
+@limiter.limit("10 per minute")
+def mark_notification_read(notif_id):
+    user = require_auth(request)
+    notif = Notification.query.get_or_404(notif_id)
+    if notif.user_id != user.id:
+        abort(403)
+    notif.read = True
+    db.session.commit()
+    return jsonify(notification_schema.dump(notif))
+
+
+@app.route('/admin/transaction/<int:tx_id>/flag', methods=['PUT'])
+@limiter.limit("10 per minute")
+def admin_flag_transaction(tx_id):
+    admin = require_admin(request)
+    data = request.get_json() or {}
+    flagged = data.get("flagged", True)
+
+    tx = Transaction.query.get_or_404(tx_id)
+    tx.flagged = bool(flagged)
+    db.session.commit()
+    log_event("transaction_flag", f"Transaction {tx_id} flagged={flagged}", user_id=admin.id)
+    return jsonify(transaction_schema.dump(tx))
 
 
 if __name__ == "__main__":
