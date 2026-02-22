@@ -534,6 +534,72 @@ def update_preferences():
     return jsonify(preferences_schema.dump(prefs))
 
 
+# ── admin RBAC & audit logging ────────────────────────────────────────────────
+
+def require_admin(req):
+    user = require_auth(req)
+    if user.role != 'admin':
+        abort(403)
+    return user
+
+
+def log_event(event_type, description, user_id=None):
+    entry = AuditLog(event_type=event_type, description=description, user_id=user_id)
+    db.session.add(entry)
+    db.session.commit()
+
+
+@app.route('/admin/users', methods=['GET'])
+@limiter.limit("10 per minute")
+def admin_list_users():
+    require_admin(request)
+    from model.user import UserSchema
+    users = User.query.all()
+    return jsonify(UserSchema(many=True).dump(users))
+
+
+@app.route('/admin/user/<int:user_id>/status', methods=['PUT'])
+@limiter.limit("10 per minute")
+def admin_set_user_status(user_id):
+    admin = require_admin(request)
+    data = request.get_json() or {}
+    new_status = data.get("status")
+
+    if new_status not in ("active", "suspended"):
+        return jsonify({"error": "status must be 'active' or 'suspended'"}), 400
+
+    target = User.query.get_or_404(user_id)
+    target.status = new_status
+    db.session.commit()
+    log_event("user_status_change", f"User {target.user_name} set to {new_status}", user_id=admin.id)
+    return jsonify({"id": target.id, "user_name": target.user_name, "status": target.status})
+
+
+@app.route('/admin/audit-log', methods=['GET'])
+@limiter.limit("10 per minute")
+def admin_audit_log():
+    require_admin(request)
+    logs = AuditLog.query.order_by(AuditLog.timestamp.desc()).limit(200).all()
+    return jsonify(audit_logs_schema.dump(logs))
+
+
+@app.route('/admin/user/<int:user_id>/role', methods=['PUT'])
+@limiter.limit("10 per minute")
+def admin_set_user_role(user_id):
+    admin = require_admin(request)
+    data = request.get_json() or {}
+    new_role = data.get("role")
+
+    if new_role not in ("user", "admin"):
+        return jsonify({"error": "role must be 'user' or 'admin'"}), 400
+
+    target = User.query.get_or_404(user_id)
+    target.role = new_role
+    db.session.commit()
+    log_event("role_change", f"User {target.user_name} role changed to {new_role}", user_id=admin.id)
+    return jsonify({"id": target.id, "user_name": target.user_name, "role": target.role})
+
+
 if __name__ == "__main__":
     with app.app_context():
         db.create_all()
